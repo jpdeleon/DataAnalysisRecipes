@@ -17,9 +17,6 @@ dependencies = [
     "pillow>=10.0",            # used by pypdfium2 to save rendered figures as PNG
 ]
 
-[project.scripts]
-dar-convert = "scripts.convert:main"
-
 [dependency-groups]
 dev = [
     "ghp-import>=2.1.0",

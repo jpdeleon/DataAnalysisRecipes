@@ -31,7 +31,7 @@ jobs:
         run: uv sync
 
       - name: Convert LaTeX chapters to MyST markdown
-        run: uv run dar-convert
+        run: uv run python -m scripts.convert
 
       - name: Build the book
         run: uv run jupyter-book build book
