@@ -2,22 +2,4 @@
 format: jb-book
 root: intro
 chapters:
-  - file: chapters/preface
   - file: chapters/straightline
-  - file: chapters/uncertainties
-  - file: chapters/probability
-  - file: chapters/philosophy
-  - file: chapters/bayesfactor
-  - file: chapters/modelselection
-  - file: chapters/modelspecification
-  - file: chapters/mml
-  - file: chapters/density
-  - file: chapters/dimensionality
-  - file: chapters/hierarchical-toy
-  - file: chapters/classification
-  - file: chapters/decision
-  - file: chapters/imaging
-  - file: chapters/poisson
-  - file: chapters/pgm
-  - file: chapters/sharing
-  - file: chapters/blackhole

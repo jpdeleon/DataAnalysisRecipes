@@ -1,7 +1,7 @@
 [project]
 name = "data-analysis-recipes"
 version = "0.1.0"
-description = "Jupyter Book build of David W. Hogg's 'Data Analysis Recipes' chapters, rendered for GitHub Pages."
+description = "Jupyter Book build of the straight-line chapter from David W. Hogg's Data Analysis Recipes."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "See repository; chapters (c) the authors, all rights reserved." }
@@ -26,5 +26,5 @@ dev = [
 package = false
 
 [tool.dar]
-# Source LaTeX chapters in build order. Each entry: source .tex relative to repo root.
-# Titles are auto-extracted from the \section* line when not given here.
+# The Jupyter Book source is straightline/straightline.tex; conversion settings
+# live in scripts/convert.py.

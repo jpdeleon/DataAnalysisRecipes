@@ -4,33 +4,34 @@ Chapters from Hogg's non-existent book.
 
 ### Read it online (Jupyter Book) ###
 
-The LaTeX chapters are also published as a web-readable **Jupyter Book** on
-GitHub Pages. The site is built automatically from the `.tex` sources, so the
-web edition tracks the LaTeX.
+The straight-line fitting chapter is also published as a web-readable **Jupyter
+Book** on GitHub Pages. The site is built automatically from
+`straightline/straightline.tex`, so the web edition tracks the LaTeX.
 
 **Build locally** (requires [`uv`](https://docs.astral.sh/uv/); pandoc is bundled,
 no system install needed):
 
 ```bash
 uv sync                 # create the env (uv provisions Python 3.10–3.12)
-uv run python -m scripts.convert   # .tex -> book/chapters/*.md (+ figures, _toc.yml)
+uv run python -m scripts.convert   # straightline.tex -> MyST (+ figures and code)
 uv run jupyter-book build book     # -> book/_build/html/index.html
 ```
 
 **How it works**
 
-- `scripts/convert.py` sanitises each chapter's LaTeX (inlining the shared
+- `scripts/convert.py` sanitises the chapter's LaTeX (inlining the shared
   `hogg_style.tex` macros, neutralising endnotes/deluxetable/marginfix), runs
-  **pandoc** (via `pypandoc-binary`) to MyST markdown, and rasterises referenced
-  PDF figures to PNG with `pypdfium2`.
+  **pandoc** (via `pypandoc-binary`) to MyST markdown, rasterises referenced PDF
+  figures to PNG with `pypdfium2`, and adds collapsible worked-solution source
+  from `straightline/src` beside the relevant exercises.
 - `book/_config.yml` + the generated `book/_toc.yml` drive the
   [Jupyter Book](https://jupyterbook.org) (v1, Sphinx) build.
 - `.github/workflows/deploy.yml` runs the same steps in CI and publishes
   `book/_build/html` to GitHub Pages on every push to `master`.
 
 To enable publishing: in the repo's **Settings → Pages**, set **Source** to
-**GitHub Actions**. Chapters are converted mechanically, so some draft chapters,
-cross-references, and figures are incomplete on the web; the LaTeX remains
+**GitHub Actions**. The chapter is converted mechanically, so some
+cross-references and figures are incomplete on the web; the LaTeX remains
 canonical.
 
 ### Authors: ###
