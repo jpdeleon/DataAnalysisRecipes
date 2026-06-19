@@ -1,0 +1,340 @@
+"""Convert the Data Analysis Recipes LaTeX chapters into MyST markdown for Jupyter Book.
+
+The chapters are standalone LaTeX ``article`` documents that share a set of custom
+macros (``hogg_style.tex``) and rely on packages pandoc cannot follow (endnotes,
+deluxetable, marginfix). This script sanitises each ``.tex`` file, expands the shared
+macros, renders any referenced PDF figures to PNG, runs pandoc, and writes one MyST
+markdown page per chapter plus a generated ``_toc.yml``.
+
+Run with:  uv run dar-convert    (or)    uv run python -m scripts.convert
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import sys
+from pathlib import Path
+
+import pypandoc
+
+REPO = Path(__file__).resolve().parent.parent
+BOOK = REPO / "book"
+CHAPTERS_DIR = BOOK / "chapters"
+
+# ---------------------------------------------------------------------------
+# Chapter ordering. (source .tex relative to repo root, slug, title)
+# Title is used as the page H1 / TOC label.
+# ---------------------------------------------------------------------------
+CHAPTERS: list[tuple[str, str, str]] = [
+    ("preface/preface.tex", "preface", "Preface: Everything I know about data analysis"),
+    ("straightline/straightline.tex", "straightline", "Fitting a model to data"),
+    ("uncertainties/uncertainties.tex", "uncertainties", "What is the uncertainty on my measurement?"),
+    ("philosophy/probability.tex", "probability", "Probability calculus for inference"),
+    ("philosophy/philosophy.tex", "philosophy", "The philosophy of data analysis"),
+    ("philosophy/bayesfactor.tex", "bayesfactor", "Bayes factors and model comparison"),
+    ("modelselection/modelselection.tex", "modelselection", "Model selection"),
+    ("modelselection/modelspecification.tex", "modelspecification", "Model specification"),
+    ("modelselection/mml.tex", "mml", "Minimum message length"),
+    ("density/density.tex", "density", "Inferring distributions from noisy measurements"),
+    ("dimensionality/dimensionality.tex", "dimensionality", "Dimensionality reduction"),
+    ("hierarchical/toy.tex", "hierarchical-toy", "Hierarchical inference: a toy problem"),
+    ("hierarchical/classification.tex", "classification", "Classification"),
+    ("decision/decision.tex", "decision", "Decision making"),
+    ("imaging/images.tex", "imaging", "Imaging and image analysis"),
+    ("poisson/variablePoisson.tex", "poisson", "The variable Poisson process"),
+    ("pgm/pgm.tex", "pgm", "Probabilistic graphical models"),
+    ("sharing/sharing.tex", "sharing", "Sharing your data-analysis code"),
+    ("straightline/blackhole.tex", "blackhole", "Black-hole mass measurement (worked example)"),
+]
+
+# ---------------------------------------------------------------------------
+# Compatibility preamble: safe defaults for macros that pandoc cannot resolve
+# from the (stripped) custom packages. Real \newcommand defs from the chapter
+# body still override these where present; our forced \note redefinition is
+# re-applied after macro extraction so endnotes become footnotes.
+# ---------------------------------------------------------------------------
+COMPAT_PREAMBLE = r"""
+\newcommand{\sectionname}{Section}
+\newcommand{\documentname}{Chapter}
+\newcommand{\documentnames}{Chapters}
+\newcommand{\equationname}{equation}
+\newcommand{\figurename}{Figure}
+\newcommand{\tablename}{Table}
+\newcommand{\problemname}{Problem}
+\newcommand{\notename}{note}
+\newcommand{\foreign}[1]{\emph{#1}}
+\newcommand{\notenglish}[1]{\emph{#1}}
+\newcommand{\project}[1]{\emph{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\acronym}[1]{#1}
+\newcommand{\affil}[1]{#1}
+\newcommand{\etal}{et al.}
+\newcommand{\eg}{e.g.}
+\newcommand{\vs}{vs.}
+\newcommand{\aposteriori}{a~posteriori}
+\newcommand{\apriori}{a~priori}
+\newcommand{\adhoc}{ad~hoc}
+\newcommand{\arxiv}[1]{arXiv:#1}
+\newcommand{\doi}[1]{doi:#1}
+\newcommand{\isbn}[1]{ISBN:#1}
+\newcommand{\chaptertitle}{}
+\newcommand{\githash}{}
+\newcommand{\gitdate}{}
+\newcommand{\note}[1]{\footnote{#1}}
+"""
+
+# Single-argument commands whose whole call (incl. argument) should be removed.
+DROP_WITH_ARG = ["footnotetext", "markright", "thispagestyle", "pagestyle",
+                 "pagenumbering", "bibliographystyle", "setcitestyle", "label"]
+# Two-argument commands to drop entirely.
+DROP_WITH_TWO_ARGS = ["markboth", "setlength"]
+# Bare commands (no args) to drop.
+DROP_BARE = ["footnotemark", "raggedbottom", "raggedright", "clearpage", "newpage",
+             "frenchspacing", "theendnotes", "numberparagraphs", "maketitle",
+             "tableofcontents", "noindent", "bigskip", "medskip", "smallskip"]
+
+
+def _find_matching_brace(s: str, open_idx: int) -> int:
+    """Return index of the brace matching the ``{`` at ``open_idx`` (or -1)."""
+    depth = 0
+    for i in range(open_idx, len(s)):
+        if s[i] == "{":
+            depth += 1
+        elif s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def strip_command(text: str, name: str, nargs: int = 1) -> str:
+    """Remove ``\\name{..}`` (and following ``{..}`` groups for nargs>1)."""
+    pattern = re.compile(r"\\" + name + r"\s*\*?\s*(?=\{)")
+    out, idx = [], 0
+    while True:
+        m = pattern.search(text, idx)
+        if not m:
+            out.append(text[idx:])
+            break
+        out.append(text[idx:m.start()])
+        pos = m.end()
+        for _ in range(nargs):
+            if pos < len(text) and text[pos] == "{":
+                close = _find_matching_brace(text, pos)
+                if close == -1:
+                    break
+                pos = close + 1
+            else:
+                break
+        idx = pos
+    return "".join(out)
+
+
+def strip_environment(text: str, env: str) -> str:
+    """Remove ``\\begin{env}...\\end{env}`` blocks (also the starred variant)."""
+    pattern = re.compile(
+        r"\\begin\{" + env + r"\*?\}.*?\\end\{" + env + r"\*?\}", re.DOTALL)
+    return pattern.sub("\n*(table omitted in web edition)*\n", text)
+
+
+def extract_text_macros(style_path: Path) -> str:
+    """Inline the macro definitions from hogg_style, preserving multi-line bodies.
+
+    Removes only what pandoc cannot parse — the ``\\makeatletter`` block (internal
+    ``@`` commands and the figure-caption redefinition) and layout/package lines —
+    while keeping ``\\newcommand``/``\\newenvironment`` definitions intact, including
+    multi-line ones such as ``\\exampleplot`` that wrap ``\\includegraphics``.
+    """
+    if not style_path.exists():
+        return ""
+    raw = style_path.read_text(encoding="utf-8", errors="replace")
+    raw = re.sub(r"\\makeatletter.*?\\makeatother", "", raw, flags=re.DOTALL)
+    drop_prefixes = ("\\usepackage", "\\RequirePackage", "\\IfFileExists",
+                     "\\setlength", "\\linespread", "\\frenchspacing",
+                     "\\pagestyle", "\\documentclass", "\\input")
+    kept = [ln for ln in raw.splitlines()
+            if not ln.lstrip().startswith(drop_prefixes)]
+    return "\n".join(kept)
+
+
+def sanitize(tex: str, source: Path) -> str:
+    """Turn a raw chapter .tex into pandoc-friendly LaTeX."""
+    # Drop comments (keep escaped \%).
+    tex = re.sub(r"(?<!\\)%.*", "", tex)
+
+    # Inline the shared style macros wherever it is \input.
+    style = extract_text_macros(REPO / "hogg_style.tex")
+    # lambda replacement: the macro text contains backslashes that re.sub would
+    # otherwise mis-read as escape sequences in a plain replacement string.
+    tex = re.sub(r"\\input\{[^}]*hogg_style[^}]*\}", lambda _m: style, tex)
+    # Drop any remaining \input (deluxetable, endnotes, etc. are handled via compat).
+    tex = re.sub(r"\\input\{[^}]*\}", "", tex)
+
+    # Remove preamble noise that pandoc chokes on.
+    tex = re.sub(r"\\documentclass\[[^\]]*\]\{[^}]*\}", "", tex)
+    tex = re.sub(r"\\documentclass\{[^}]*\}", "", tex)
+    tex = re.sub(r"\\usepackage(\[[^\]]*\])?\{[^}]*\}", "", tex)
+    tex = re.sub(r"\\bibliography\{[^}]*\}", "", tex)
+    tex = re.sub(r"\\linespread\{[^}]*\}", "", tex)
+    tex = re.sub(r"\\makeatletter.*?\\makeatother", "", tex, flags=re.DOTALL)
+    # Remove the chapter's own \note/\endnote redefinitions; compat \note wins.
+    tex = re.sub(r"\\(re)?newcommand\{\\note\}.*", "", tex)
+    tex = re.sub(r"\\def\\enotesize.*", "", tex)
+    tex = re.sub(r"\\renewcommand\{\\thefootnote\}.*", "", tex)
+    tex = re.sub(r"\\renewcommand\{\\sectionmark\}.*", "", tex)
+    tex = re.sub(r"\\renewcommand\{\\MakeUppercase\}.*", "", tex)
+    # \and (author separator) is only valid inside \author{}; turn into a break.
+    tex = re.sub(r"\\and(?![a-zA-Z])", lambda _m: r"\\", tex)
+
+    for name in DROP_WITH_TWO_ARGS:
+        tex = strip_command(tex, name, 2)
+    for name in DROP_WITH_ARG:
+        tex = strip_command(tex, name, 1)
+    for name in DROP_BARE:
+        tex = re.sub(r"\\" + name + r"(?![a-zA-Z])", "", tex)
+    # A DROP_BARE token may have lived inside its own \newcommand{\token}{} def,
+    # leaving an invalid \newcommand{}{...}; drop any such empty-name definitions.
+    tex = re.sub(r"\\(re)?newcommand\s*\{\s*\}\s*(\[\d\])?\s*\{[^}]*\}", "", tex)
+
+    # deluxetable / table environments pandoc cannot model.
+    for env in ("deluxetable", "table"):
+        tex = strip_environment(tex, env)
+
+    # Pre-expand the hogg_style figure helpers to plain \includegraphics, and
+    # unwrap figure/center floats so images render inline instead of becoming
+    # empty <figure> shells. Captions are kept as italic paragraphs.
+    tex = re.sub(r"\\exampleplottwo\{([^}]*)\}\{([^}]*)\}",
+                 lambda m: f"\\includegraphics{{{m.group(1)}}}\n\n"
+                           f"\\includegraphics{{{m.group(2)}}}", tex)
+    tex = re.sub(r"\\exampleplot\{([^}]*)\}",
+                 lambda m: f"\\includegraphics{{{m.group(1)}}}", tex)
+    tex = re.sub(r"\\begin\{figure\}(\[[^\]]*\])?", "", tex)
+    tex = re.sub(r"\\begin\{center\}", "", tex)
+    tex = tex.replace(r"\end{figure}", "").replace(r"\end{center}", "")
+    tex = re.sub(r"\\caption\{", r"\\par\\textit{", tex)
+
+    # The title is a starred section; demote to a normal heading pandoc keeps.
+    tex = tex.replace(r"\section*", r"\section")
+    tex = tex.replace(r"\subsection*", r"\subsection")
+
+    return tex
+
+
+def assemble(tex: str) -> str:
+    """Prepend documentclass + compat defs, keeping the chapter's own preamble.
+
+    The chapter preamble holds the inlined hogg_style macros (e.g. ``\\exampleplot``,
+    which wraps ``\\includegraphics``) and the chapter's math macros, so it must be
+    fed to pandoc alongside the body — not stripped away.
+    """
+    head = r"\documentclass{article}" + "\n" + COMPAT_PREAMBLE + "\n"
+    if r"\begin{document}" in tex:
+        return head + tex
+    return head + "\\begin{document}\n" + tex + "\n\\end{document}\n"
+
+
+def render_pdf_to_png(pdf: Path, out_png: Path) -> bool:
+    """Render the first page of a PDF to PNG at ~150 dpi. Returns success."""
+    try:
+        import pypdfium2 as pdfium
+    except Exception:
+        return False
+    try:
+        doc = pdfium.PdfDocument(str(pdf))
+        page = doc[0]
+        bitmap = page.render(scale=150 / 72)
+        bitmap.to_pil().save(out_png)
+        return True
+    except Exception as exc:  # noqa: BLE001 - best effort, log and skip
+        print(f"    ! could not render {pdf.name}: {exc}", file=sys.stderr)
+        return False
+
+
+def resolve_asset(name: str, search_dirs: list[Path]) -> Path | None:
+    """Find a figure file by stem, preferring rasterised formats."""
+    stem = Path(name).stem
+    candidates = []
+    for d in search_dirs:
+        candidates += [d / f"{stem}.png", d / f"{stem}.jpg", d / name, d / f"{stem}.pdf"]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def copy_assets(md: str, source: Path, dest_dir: Path) -> str:
+    """Copy referenced images next to the page; convert PDFs to PNG. Rewrite paths."""
+    search_dirs = [source.parent, source.parent / "pngfigs", source.parent / "code"]
+    img_dir = dest_dir / "figs"
+
+    def repl(m: re.Match) -> str:
+        alt, target = m.group(1), m.group(2).split()[0].strip('"')
+        asset = resolve_asset(target, search_dirs)
+        if asset is None:
+            return f"*(figure unavailable: `{Path(target).name}`)*"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        if asset.suffix.lower() == ".pdf":
+            out = img_dir / (asset.stem + ".png")
+            if not render_pdf_to_png(asset, out):
+                return f"*(figure unavailable: `{asset.name}`)*"
+        else:
+            out = img_dir / asset.name
+            shutil.copy2(asset, out)
+        return f"![{alt}](figs/{out.name})"
+
+    return re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", repl, md)
+
+
+def convert_chapter(src_rel: str, slug: str, title: str) -> bool:
+    source = REPO / src_rel
+    if not source.exists():
+        print(f"  - skip {src_rel} (missing)")
+        return False
+    print(f"  - {src_rel} -> chapters/{slug}.md")
+    tex = source.read_text(encoding="utf-8", errors="replace")
+    doc = assemble(sanitize(tex, source))
+    try:
+        md = pypandoc.convert_text(
+            doc, "commonmark_x", format="latex",
+            extra_args=["--wrap=none", "--mathjax"])
+    except Exception as exc:  # noqa: BLE001
+        dbg = REPO / "book" / "_debug" / f"{slug}.tex"
+        dbg.parent.mkdir(parents=True, exist_ok=True)
+        dbg.write_text(doc, encoding="utf-8")
+        print(f"    ! pandoc failed for {slug}: {str(exc)[:200]} (dumped {dbg})",
+              file=sys.stderr)
+        return False
+
+    dest_dir = CHAPTERS_DIR
+    md = copy_assets(md, source, dest_dir)
+
+    # Drop a leading duplicate title heading pandoc may emit; we add our own.
+    md = re.sub(r"\A\s*#\s+.*\n", "", md, count=1)
+    header = f"# {title}\n\n"
+    (dest_dir / f"{slug}.md").write_text(header + md.strip() + "\n", encoding="utf-8")
+    return True
+
+
+def write_toc(converted: list[tuple[str, str]]) -> None:
+    lines = ["# Auto-generated by scripts/convert.py — do not edit by hand.",
+             "format: jb-book", "root: intro", "chapters:"]
+    for slug, _title in converted:
+        lines.append(f"  - file: chapters/{slug}")
+    (BOOK / "_toc.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"  wrote _toc.yml ({len(converted)} chapters)")
+
+
+def main() -> int:
+    print(f"pandoc: {pypandoc.get_pandoc_version()}")
+    CHAPTERS_DIR.mkdir(parents=True, exist_ok=True)
+    converted: list[tuple[str, str]] = []
+    for src_rel, slug, title in CHAPTERS:
+        if convert_chapter(src_rel, slug, title):
+            converted.append((slug, title))
+    write_toc(converted)
+    print(f"Done: {len(converted)}/{len(CHAPTERS)} chapters converted.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

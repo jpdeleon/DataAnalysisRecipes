@@ -1,0 +1,33 @@
+[project]
+name = "data-analysis-recipes"
+version = "0.1.0"
+description = "Jupyter Book build of David W. Hogg's 'Data Analysis Recipes' chapters, rendered for GitHub Pages."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "See repository; chapters (c) the authors, all rights reserved." }
+authors = [
+    { name = "David W. Hogg" },
+    { name = "Jo Bovy" },
+    { name = "Dustin Lang" },
+]
+dependencies = [
+    "jupyter-book>=1.0.3,<2",   # classic Sphinx-based build (uses _config.yml/_toc.yml)
+    "pypandoc-binary>=1.13",   # bundles the pandoc binary, no system install needed
+    "pypdfium2>=4.30",         # renders PDF figures to PNG so they display on the web
+    "pillow>=10.0",            # used by pypdfium2 to save rendered figures as PNG
+]
+
+[project.scripts]
+dar-convert = "scripts.convert:main"
+
+[dependency-groups]
+dev = [
+    "ghp-import>=2.1.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.dar]
+# Source LaTeX chapters in build order. Each entry: source .tex relative to repo root.
+# Titles are auto-extracted from the \section* line when not given here.

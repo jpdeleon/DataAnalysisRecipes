@@ -1,0 +1,39 @@
+# Jupyter Book configuration
+# Docs: https://jupyterbook.org/customize/config.html
+title: Data Analysis Recipes
+author: David W. Hogg, Jo Bovy, Dustin Lang, and collaborators
+logo: ""
+only_build_toc_files: true
+
+# Markdown / MyST features used by the converted chapters.
+parse:
+  myst_enable_extensions:
+    - amsmath        # \begin{align} etc.
+    - dollarmath     # $...$ and $$...$$
+    - colon_fence
+    - deflist
+    - linkify
+    - substitution
+
+# Do not execute notebooks (the book is prose + math, no live code).
+execute:
+  execute_notebooks: "off"
+
+# Allow the build to finish even if a chapter has warnings (broken refs, etc.).
+sphinx:
+  config:
+    nb_execution_show_tb: true
+    mathjax3_config:
+      tex:
+        macros: {}
+
+html:
+  use_issues_button: false
+  use_repository_button: true
+  home_page_in_navbar: true
+
+repository:
+  url: https://github.com/davidwhogg/DataAnalysisRecipes
+  branch: master
+
+# Tolerate the cross-reference / missing-figure warnings these draft chapters produce.

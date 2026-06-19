@@ -8,3 +8,16 @@
 *.pdf
 *.png
 vc.tex
+
+# Python / uv
+__pycache__/
+*.pyc
+
+# Jupyter Book / uv
+.venv/
+/_build/
+book/_build/
+book/_debug/
+book/chapters/*.md
+book/chapters/figs/
+!book/intro.md
